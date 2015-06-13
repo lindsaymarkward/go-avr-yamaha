@@ -8,7 +8,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// timeout value for HTTP and UDP commands
+const timeout = time.Second * 2
 
 type AVR struct {
 	IP    string
@@ -18,18 +22,36 @@ type AVR struct {
 // SendCommand sends an XML YNC command to a given ip using POST
 // it returns the response, the status (200 OK or 400 Bad Request) and an error value
 func SendCommand(cmd, ip string) (string, string, error) {
+	success := make(chan *http.Response, 1)
+	var err error
+	var response *http.Response
 	url := "http://" + ip + ":80/YamahaRemoteControl/ctrl"
-	// update command as valid string
+	// prepend command with XML tag
 	cmd = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + cmd
 
-	var query = []byte(cmd)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(query))
-	client := &http.Client{}
-	response, err := client.Do(req)
-	defer response.Body.Close()
-	body, _ := ioutil.ReadAll(response.Body)
-
-	return string(body), response.Status, err
+	go func() {
+		var query = []byte(cmd)
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(query))
+		client := &http.Client{}
+		response, err = client.Do(req)
+		if err == nil {
+			defer response.Body.Close()
+			success <- response
+		} else {
+			success <- nil
+		}
+	}()
+	select {
+	case response := <-success:
+		if response != nil {
+			body, _ := ioutil.ReadAll(response.Body)
+			return string(body), response.Status, err
+		} else {
+			return "", "", fmt.Errorf("Error handling HTTP command %v\n", cmd)
+		}
+	case <-time.After(timeout):
+		return "", "", fmt.Errorf("Timeout handling HTTP command %v\n", cmd)
+	}
 }
 
 // ChangeVolume adjusts the volume by amount for a given zone
@@ -62,25 +84,29 @@ func (r *AVR) SetPower(power string, zone int) error {
 
 // TogglePower toggles the power (On/Standby) for a given zone
 // toggling is actually handled by the AVR when "On/Standby" is the Power value - no need to get state
-func (r *AVR) TogglePower(zone int) error {
+// returns the present (new) state (true/false)
+func (r *AVR) TogglePower(zone int) (bool, error) {
 	zoneText := "Main_Zone"
 	if zone > 1 {
 		zoneText = "Zone_" + strconv.Itoa(zone)
 	}
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Power_Control><Power>On/Standby</Power></Power_Control></%v></YAMAHA_AV>", zoneText, zoneText)
 	_, _, err := SendCommand(command, r.IP)
-	return err
+	state, _ := r.GetPower(zone)
+	return state, err
 }
 
 // ToggleMuted toggles the muted state (On/Off) for a given zone
-func (r *AVR) ToggleMuted(zone int) error {
+// returns the present (new) state (true/false)
+func (r *AVR) ToggleMuted(zone int) (bool, error) {
 	zoneText := "Main_Zone"
 	if zone > 1 {
 		zoneText = "Zone_" + strconv.Itoa(zone)
 	}
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Mute>On/Off</Mute></Volume></%v></YAMAHA_AV>", zoneText, zoneText)
 	_, _, err := SendCommand(command, r.IP)
-	return err
+	state, _ := r.GetMuted(zone)
+	return state, err
 }
 
 // SetMuted sets the muted state to "On" or "Off" (as passed in) for a given zone
@@ -139,25 +165,37 @@ func (r *AVR) GetMuted(zone int) (bool, error) {
 // returns an empty string if not found ??
 // TODO: right now it only finds MythTV, not the AVR
 func Discover() (string, error) {
-	// TODO: Add timeout and return error when not found after a while
+	success := make(chan string, 1)
+
 	searchString := "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 10\r\n Man: \"ssdp:discover\"\r\n ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n "
 	//	searchString = "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 10\r\n Man: \"ssdp:discover\"\r\n ST: ssdp:all\r\n "
 	//	var ip string
 	var response string
-	ssdp, _ := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
-	c, _ := net.ListenPacket("udp4", ":0")
-	socket := c.(*net.UDPConn)
-	message := []byte(searchString)
-	socket.WriteToUDP(message, ssdp)
-	answerBytes := make([]byte, 1024)
-	// stores result in answerBytes (pass-by-reference)
-	_, _, err := socket.ReadFromUDP(answerBytes)
-	if err == nil {
-		response = string(answerBytes)
-		// extract IP address from full response
-		//		startIndex := strings.Index(response, "LOCATION: ") + 17
-		//		endIndex := strings.Index(response, "MAC: ") - 2
-		//		ip = response[startIndex:endIndex]
+	var err error
+
+	go func() {
+		ssdp, _ := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
+		c, _ := net.ListenPacket("udp4", ":0")
+		socket := c.(*net.UDPConn)
+		message := []byte(searchString)
+		socket.WriteToUDP(message, ssdp)
+		answerBytes := make([]byte, 1024)
+		// stores result in answerBytes (pass-by-reference)
+		_, _, err = socket.ReadFromUDP(answerBytes)
+		if err == nil {
+			response = string(answerBytes)
+			// extract IP address from full response
+			//		startIndex := strings.Index(response, "LOCATION: ") + 17
+			//		endIndex := strings.Index(response, "MAC: ") - 2
+			//		ip = response[startIndex:endIndex]
+			success <- response
+		}
+	}()
+
+	select {
+	case <-success:
+		return response, err
+	case <-time.After(timeout):
+		return "", fmt.Errorf("Timeout trying to find Yamaha AVR via SSDP")
 	}
-	return response, err
 }

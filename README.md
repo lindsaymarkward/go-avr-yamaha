@@ -6,4 +6,5 @@ Designed to suit usage as a library for Ninja Sphere driver: sphere-yamaha
 Supports changing/setting:
 
   - power: on/off/toggle
-  - mute: 
+  - mute: on/off/toggle
+  - volume: change +/-
