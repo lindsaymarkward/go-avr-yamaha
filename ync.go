@@ -2,8 +2,10 @@ package ync
 
 import (
 	"bytes"
+	"encoding/xml"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -14,71 +16,76 @@ import (
 // timeout value for HTTP and UDP commands
 const timeout = time.Second * 2
 
+// min/max volumes
+const MaxVolume = 16.5
+const MinVolume = -80.5
+
 type AVR struct {
 	IP    string
-	Zones int
+	ID    string // serial number
+	Name  string
+	Model string
 }
 
-// SendCommand sends an XML YNC command to a given ip using POST
-// it returns the response, the status (200 OK or 400 Bad Request) and an error value
-func SendCommand(cmd, ip string) (string, string, error) {
-	success := make(chan *http.Response, 1)
-	var err error
-	var response *http.Response
-	url := "http://" + ip + ":80/YamahaRemoteControl/ctrl"
-	// prepend command with XML tag
-	cmd = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + cmd
+// resultError is a multiple-value struct for our channel
+type resultError struct {
+	text []byte
+	err  error
+}
 
-	go func() {
-		var query = []byte(cmd)
-		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(query))
-		client := &http.Client{}
-		response, err = client.Do(req)
-		if err == nil {
-			defer response.Body.Close()
-			success <- response
-		} else {
-			success <- nil
-		}
-	}()
-	select {
-	case response := <-success:
-		if response != nil {
-			body, _ := ioutil.ReadAll(response.Body)
-			return string(body), response.Status, err
-		} else {
-			return "", "", fmt.Errorf("Error handling HTTP command %v\n", cmd)
-		}
-	case <-time.After(timeout):
-		return "", "", fmt.Errorf("Timeout handling HTTP command %v\n", cmd)
-	}
+// Result is the top-level XML container needed
+type Result struct {
+	Device DeviceXML `xml:"device"`
+}
+
+// DeviceXML is the XML container that stores the data we are interested in
+type DeviceXML struct {
+	FriendlyName string `xml:"friendlyName"`
+	SerialNumber string `xml:"serialNumber"`
+	ModelName    string `xml:"modelName"`
 }
 
 // ChangeVolume adjusts the volume by amount for a given zone
-// amount must be a supported value +/- 1, 2, 5
-func (r *AVR) ChangeVolume(amount, zone int) error {
-	zoneText := "Main_Zone"
-	if zone > 1 {
-		zoneText = "Zone_" + strconv.Itoa(zone)
-	}
+// amount must be a supported value +/- 0.5* 1, 2, 5
+// *0.5 is done with a somewhat different command
+func (r *AVR) ChangeVolume(amount float64, zone int) error {
+	var command string
+	zoneText := setZone(zone)
 	directionText := "Up"
 	if amount < 0 {
 		directionText = "Down"
 		amount = -1 * amount
 	}
-	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Lvl><Val>%v %v dB</Val><Exp></Exp><Unit></Unit></Lvl></Volume></%v></YAMAHA_AV>", zoneText, directionText, amount, zoneText)
-	_, _, err := SendCommand(command, r.IP)
+	if amount == 0.5 {
+		command = fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Lvl><Val>%v</Val><Exp></Exp><Unit></Unit></Lvl></Volume></%v></YAMAHA_AV>", zoneText, directionText, zoneText)
+	} else {
+		command = fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Lvl><Val>%v %v dB</Val><Exp></Exp><Unit></Unit></Lvl></Volume></%v></YAMAHA_AV>", zoneText, directionText, amount, zoneText)
+	}
+	_, err := SendCommand(command, r.IP)
+	return err
+}
+
+// SetVolume sets the volume for the given zone (takes in an int like -800 or 165)
+func (r *AVR) SetVolume(volume, zone int) error {
+	zoneText := setZone(zone)
+	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Lvl><Val>%v</Val><Exp>1</Exp><Unit>dB</Unit></Lvl></Volume></%v></YAMAHA_AV>", zoneText, volume, zoneText)
+	_, err := SendCommand(command, r.IP)
+	return err
+}
+
+// SetInput sets the input for the given zone
+func (r *AVR) SetInput(input string, zone int) error {
+	zoneText := setZone(zone)
+	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Input><Input_Sel>%v</Input_Sel></Input></%v></YAMAHA_AV>", zoneText, input, zoneText)
+	_, err := SendCommand(command, r.IP)
 	return err
 }
 
 // SetPower sets the power to "On" or "Standby" (as passed in) for a given zone
 func (r *AVR) SetPower(power string, zone int) error {
-	zoneText := "Main_Zone"
-	if zone > 1 {
-		zoneText = "Zone_" + strconv.Itoa(zone)
-	}
+	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Power_Control><Power>%v</Power></Power_Control></%v></YAMAHA_AV>", zoneText, power, zoneText)
-	_, _, err := SendCommand(command, r.IP)
+	_, err := SendCommand(command, r.IP)
 	return err
 }
 
@@ -86,12 +93,9 @@ func (r *AVR) SetPower(power string, zone int) error {
 // toggling is actually handled by the AVR when "On/Standby" is the Power value - no need to get state
 // returns the present (new) state (true/false)
 func (r *AVR) TogglePower(zone int) (bool, error) {
-	zoneText := "Main_Zone"
-	if zone > 1 {
-		zoneText = "Zone_" + strconv.Itoa(zone)
-	}
+	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Power_Control><Power>On/Standby</Power></Power_Control></%v></YAMAHA_AV>", zoneText, zoneText)
-	_, _, err := SendCommand(command, r.IP)
+	_, err := SendCommand(command, r.IP)
 	state, _ := r.GetPower(zone)
 	return state, err
 }
@@ -99,54 +103,45 @@ func (r *AVR) TogglePower(zone int) (bool, error) {
 // ToggleMuted toggles the muted state (On/Off) for a given zone
 // returns the present (new) state (true/false)
 func (r *AVR) ToggleMuted(zone int) (bool, error) {
-	zoneText := "Main_Zone"
-	if zone > 1 {
-		zoneText = "Zone_" + strconv.Itoa(zone)
-	}
+	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Mute>On/Off</Mute></Volume></%v></YAMAHA_AV>", zoneText, zoneText)
-	_, _, err := SendCommand(command, r.IP)
+	_, err := SendCommand(command, r.IP)
 	state, _ := r.GetMuted(zone)
 	return state, err
 }
 
 // SetMuted sets the muted state to "On" or "Off" (as passed in) for a given zone
 func (r *AVR) SetMuted(state string, zone int) error {
-	zoneText := "Main_Zone"
-	if zone > 1 {
-		zoneText = "Zone_" + strconv.Itoa(zone)
-	}
+	zoneText := setZone(zone)
 
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Mute>%v</Mute></Volume></%v></YAMAHA_AV>", zoneText, state, zoneText)
-	_, _, err := SendCommand(command, r.IP)
+	_, err := SendCommand(command, r.IP)
 	return err
 }
 
 // GetPower returns the current state of the power (true/false) for a given zone
 func (r *AVR) GetPower(zone int) (bool, error) {
-	zoneText := "Main_Zone"
-	if zone > 1 {
-		zoneText = "Zone_" + strconv.Itoa(zone)
-	}
+	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"GET\"><%v><Basic_Status>GetParam</Basic_Status></%v></YAMAHA_AV>", zoneText, zoneText)
-	response, _, err := SendCommand(command, r.IP)
+	response, err := SendCommand(command, r.IP)
 	// could use xml.Unmarshal, but doesn't seem necessary - the YNC API shouldn't change so this is simpler
+	if err != nil {
+		return false, err
+	}
 	i := strings.Index(response, "<Power>")
 	if response[i+7:i+9] == "On" {
-		return true, err
+		return true, nil
 	} else {
-		return false, err
+		return false, nil
 	}
 }
 
 // GetMuted returns the current state of the power (true/false) for a given zone
 func (r *AVR) GetMuted(zone int) (bool, error) {
-	zoneText := "Main_Zone"
-	if zone > 1 {
-		zoneText = "Zone_" + strconv.Itoa(zone)
-	}
+	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"GET\"><%v><Basic_Status>GetParam</Basic_Status></%v></YAMAHA_AV>", zoneText, zoneText)
-	response, _, err := SendCommand(command, r.IP)
-	fmt.Println(response)
+	response, err := SendCommand(command, r.IP)
+	//	fmt.Println(response)
 	i := strings.Index(response, "<Mute>")
 	if response[i+6:i+8] == "On" {
 		return true, err
@@ -155,7 +150,85 @@ func (r *AVR) GetMuted(zone int) (bool, error) {
 	}
 }
 
+// GetMuted returns the current state of the power (true/false) for a given zone
+func (r *AVR) GetVolume(zone int) (float64, error) {
+	zoneText := setZone(zone)
+	command := fmt.Sprintf("<YAMAHA_AV cmd=\"GET\"><%v><Basic_Status>GetParam</Basic_Status></%v></YAMAHA_AV>", zoneText, zoneText)
+	response, err := SendCommand(command, r.IP)
+	if err != nil {
+		return 0, err
+	}
+	// crop response string to just volume data
+	start := strings.Index(response, "<Volume>")
+	end := strings.Index(response, "</Volume>")
+	response = response[start:end]
+	start = strings.Index(response, "<Val>")
+	end = strings.Index(response, "</Val>")
+	valueString := response[start+5 : end]
+	// valueString will be like "-605", convert to float like -60.5
+	value, errConv := strconv.ParseFloat(valueString, 0)
+	return value / 10, errConv
+}
+
+// GetInput returns the current input for a given zone
+func (r *AVR) GetInput(zone int) (string, error) {
+	zoneText := setZone(zone)
+	command := fmt.Sprintf("<YAMAHA_AV cmd=\"GET\"><%v><Basic_Status>GetParam</Basic_Status></%v></YAMAHA_AV>", zoneText, zoneText)
+	response, err := SendCommand(command, r.IP)
+	if err != nil {
+		return "", err
+	}
+	// crop response string to just volume data
+	start := strings.Index(response, "<Input_Sel_Item_Info><Param>")
+	end := strings.Index(response, "</Param>")
+	valueString := response[start+len("<Input_Sel_Item_Info><Param>") : end]
+	return valueString, err
+}
+
+// GetXMLData gets the name and serial number from the Yamaha AVR's description XML file (url passed in)
+func (avr *AVR) GetXMLData(url string) error {
+	success := make(chan resultError, 1)
+	var err error
+
+	go func() {
+		// request xml file at url via HTTP GET
+		var response *http.Response
+		response, err = http.Get(url)
+		// handle GET error and non-200 status (usually 404) as errors
+		if err != nil {
+			log.Printf("Error with GET request: %v\n", err)
+			success <- resultError{nil, err}
+		} else if response.Status != "200 OK" {
+			success <- resultError{nil, fmt.Errorf(response.Status)}
+		}
+		defer response.Body.Close()
+		body, _ := ioutil.ReadAll(response.Body)
+		success <- resultError{body, nil}
+	}()
+
+	select {
+	case result := <-success:
+		if result.err != nil {
+			return fmt.Errorf("Error getting data: %v\n", result.err)
+		}
+		var data Result
+		err = xml.Unmarshal(result.text, &data)
+		if err != nil {
+			return err
+		}
+		// save data to AVR variable
+		avr.ID = data.Device.SerialNumber
+		avr.Name = data.Device.FriendlyName
+		avr.Model = data.Device.ModelName
+
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("Timeout getting data")
+	}
+}
+
 /*
+?? make functions to be used by:?
 ?	ApplyVolume      func(state *channels.VolumeState) error
 ?	ApplyPlayURL func(url string, queue bool) error
 
@@ -167,7 +240,8 @@ func (r *AVR) GetMuted(zone int) (bool, error) {
 func Discover() (string, error) {
 	success := make(chan string, 1)
 
-	searchString := "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 10\r\n Man: \"ssdp:discover\"\r\n ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n "
+	//	searchString := "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 20\r\n Man: \"ssdp:discover\"\r\n ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"
+	searchString := "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 20\r\n Man: \"ssdp:discover\"\r\n ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
 	//	searchString = "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 10\r\n Man: \"ssdp:discover\"\r\n ST: ssdp:all\r\n "
 	//	var ip string
 	var response string
@@ -184,6 +258,10 @@ func Discover() (string, error) {
 		_, _, err = socket.ReadFromUDP(answerBytes)
 		if err == nil {
 			response = string(answerBytes)
+			fmt.Println("Found: ", response)
+			//			_, _, err = socket.ReadFromUDP(answerBytes)
+			//			response = string(answerBytes)
+			//			fmt.Println("and", response)
 			// extract IP address from full response
 			//		startIndex := strings.Index(response, "LOCATION: ") + 17
 			//		endIndex := strings.Index(response, "MAC: ") - 2
@@ -199,3 +277,54 @@ func Discover() (string, error) {
 		return "", fmt.Errorf("Timeout trying to find Yamaha AVR via SSDP")
 	}
 }
+
+// SendCommand sends an XML YNC command to a given ip using POST
+// it returns the response, the status (200 OK or 400 Bad Request) and an error value
+func SendCommand(cmd, ip string) (string, error) {
+	success := make(chan resultError, 1)
+	var err error
+	//	var response *http.Response
+	// this URL could be extracted from device description XML, <yamaha:X_controlURL>/YamahaRemoteControl/ctrl</yamaha:X_controlURL>
+	url := "http://" + ip + ":80/YamahaRemoteControl/ctrl"
+	// prepend command with XML tag
+	cmd = "<?xml version=\"1.0\" encoding=\"utf-8\"?>" + cmd
+
+	go func() {
+		var query = []byte(cmd)
+		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(query))
+		client := &http.Client{}
+		response, err := client.Do(req)
+		// handle POST error and non-200 status (usually 404) as errors
+		if err != nil {
+			log.Printf("Command was %v\n", cmd)
+			log.Printf("Error with POST request: %v\n", err)
+			success <- resultError{nil, err}
+		} else if response.Status != "200 OK" {
+			success <- resultError{nil, fmt.Errorf(response.Status)}
+		}
+		defer response.Body.Close()
+		body, _ := ioutil.ReadAll(response.Body)
+		success <- resultError{body, nil}
+	}()
+	select {
+	case response := <-success:
+		if response.err != nil {
+			return "", err
+		}
+		return string(response.text), nil
+	case <-time.After(timeout):
+		return "", fmt.Errorf("Timeout handling HTTP command %v\n", cmd)
+	}
+}
+
+func setZone(zone int) string {
+	zoneText := "Main_Zone" // default zone
+	if zone > 1 {
+		zoneText = "Zone_" + strconv.Itoa(zone)
+	}
+	return zoneText
+}
+
+// could check description XML file to find services AVR provides, like
+// <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+// <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
