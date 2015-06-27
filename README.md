@@ -8,3 +8,4 @@ Supports changing/setting:
   - power: on/off/toggle
   - mute: on/off/toggle
   - volume: change +/-
+  - input

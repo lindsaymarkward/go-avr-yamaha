@@ -27,6 +27,13 @@ type AVR struct {
 	Model string
 }
 
+type AVRState struct {
+	Power  bool
+	Volume float64
+	Muted  bool
+	Input  string
+}
+
 // resultError is a multiple-value struct for our channel
 type resultError struct {
 	text []byte
@@ -95,9 +102,10 @@ func (r *AVR) SetPower(power string, zone int) error {
 func (r *AVR) TogglePower(zone int) (bool, error) {
 	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Power_Control><Power>On/Standby</Power></Power_Control></%v></YAMAHA_AV>", zoneText, zoneText)
-	_, err := SendCommand(command, r.IP)
+	// get power state before we update, otherwise it's too slow and might be incorrect
 	state, _ := r.GetPower(zone)
-	return state, err
+	_, err := SendCommand(command, r.IP)
+	return !state, err
 }
 
 // ToggleMuted toggles the muted state (On/Off) for a given zone
@@ -129,6 +137,9 @@ func (r *AVR) GetPower(zone int) (bool, error) {
 		return false, err
 	}
 	i := strings.Index(response, "<Power>")
+	if i == -1 {
+		return false, fmt.Errorf("Can't get power state")
+	}
 	if response[i+7:i+9] == "On" {
 		return true, nil
 	} else {
@@ -136,13 +147,15 @@ func (r *AVR) GetPower(zone int) (bool, error) {
 	}
 }
 
-// GetMuted returns the current state of the power (true/false) for a given zone
+// GetMuted returns the current muted state (true/false) for a given zone
 func (r *AVR) GetMuted(zone int) (bool, error) {
 	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"GET\"><%v><Basic_Status>GetParam</Basic_Status></%v></YAMAHA_AV>", zoneText, zoneText)
 	response, err := SendCommand(command, r.IP)
-	//	fmt.Println(response)
 	i := strings.Index(response, "<Mute>")
+	if i == -1 {
+		return false, fmt.Errorf("Can't get muted state")
+	}
 	if response[i+6:i+8] == "On" {
 		return true, err
 	} else {
@@ -150,7 +163,7 @@ func (r *AVR) GetMuted(zone int) (bool, error) {
 	}
 }
 
-// GetMuted returns the current state of the power (true/false) for a given zone
+// GetVolume returns the current volume for a given zone
 func (r *AVR) GetVolume(zone int) (float64, error) {
 	zoneText := setZone(zone)
 	command := fmt.Sprintf("<YAMAHA_AV cmd=\"GET\"><%v><Basic_Status>GetParam</Basic_Status></%v></YAMAHA_AV>", zoneText, zoneText)
@@ -158,16 +171,7 @@ func (r *AVR) GetVolume(zone int) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	// crop response string to just volume data
-	start := strings.Index(response, "<Volume>")
-	end := strings.Index(response, "</Volume>")
-	response = response[start:end]
-	start = strings.Index(response, "<Val>")
-	end = strings.Index(response, "</Val>")
-	valueString := response[start+5 : end]
-	// valueString will be like "-605", convert to float like -60.5
-	value, errConv := strconv.ParseFloat(valueString, 0)
-	return value / 10, errConv
+	return extractVolume(response)
 }
 
 // GetInput returns the current input for a given zone
@@ -178,16 +182,66 @@ func (r *AVR) GetInput(zone int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// crop response string to just volume data
 	start := strings.Index(response, "<Input_Sel_Item_Info><Param>")
 	end := strings.Index(response, "</Param>")
+	if start == -1 || end == -1 {
+		return "", fmt.Errorf("Can't get input state")
+	}
 	valueString := response[start+len("<Input_Sel_Item_Info><Param>") : end]
 	return valueString, err
 }
 
+// GetState returns the current state of the AVR as an AVRState struct - power, volume, mute, input
+func (r *AVR) GetState(zone int) (AVRState, error) {
+	var state AVRState
+	var err error
+	zoneText := setZone(zone)
+	command := fmt.Sprintf("<YAMAHA_AV cmd=\"GET\"><%v><Basic_Status>GetParam</Basic_Status></%v></YAMAHA_AV>", zoneText, zoneText)
+	response, err := SendCommand(command, r.IP)
+	if err != nil {
+		return state, err
+	}
+	// get power from response string
+	i := strings.Index(response, "<Power>")
+	if i == -1 {
+		return state, fmt.Errorf("Can't get power state")
+	}
+	if response[i+7:i+9] == "On" {
+		state.Power = true
+	} else {
+		state.Power = false
+	}
+	// get volume from response string
+	volume, err := extractVolume(response)
+	if err != nil {
+		return state, err
+	}
+	state.Volume = volume
+	// get muted from response string
+	i = strings.Index(response, "<Mute>")
+	if i == -1 {
+		return state, fmt.Errorf("Can't get muted state")
+	}
+	if response[i+6:i+8] == "On" {
+		state.Muted = true
+	} else {
+		state.Muted = false
+	}
+	// get input from response string
+	start := strings.Index(response, "<Input_Sel_Item_Info><Param>")
+	end := strings.Index(response, "</Param>")
+	if start == -1 || end == -1 {
+		return state, fmt.Errorf("Can't get input state")
+	}
+	valueString := response[start+len("<Input_Sel_Item_Info><Param>") : end]
+	state.Input = valueString
+	return state, err
+}
+
 // GetXMLData gets the name and serial number from the Yamaha AVR's description XML file (url passed in)
-func (avr *AVR) GetXMLData(url string) error {
+func (avr *AVR) GetXMLData() error {
 	success := make(chan resultError, 1)
+	url := "http://" + avr.IP + ":49154/MediaRenderer/desc.xml"
 	var err error
 
 	go func() {
@@ -200,16 +254,17 @@ func (avr *AVR) GetXMLData(url string) error {
 			success <- resultError{nil, err}
 		} else if response.Status != "200 OK" {
 			success <- resultError{nil, fmt.Errorf(response.Status)}
+		} else {
+			defer response.Body.Close()
+			body, _ := ioutil.ReadAll(response.Body)
+			success <- resultError{body, nil}
 		}
-		defer response.Body.Close()
-		body, _ := ioutil.ReadAll(response.Body)
-		success <- resultError{body, nil}
 	}()
 
 	select {
 	case result := <-success:
 		if result.err != nil {
-			return fmt.Errorf("Error getting data: %v\n", result.err)
+			return fmt.Errorf("Error getting XML data: %v\n", result.err)
 		}
 		var data Result
 		err = xml.Unmarshal(result.text, &data)
@@ -218,7 +273,7 @@ func (avr *AVR) GetXMLData(url string) error {
 		}
 		// save data to AVR variable
 		avr.ID = data.Device.SerialNumber
-		avr.Name = data.Device.FriendlyName
+		//		avr.Name = data.Device.FriendlyName	// this is the same as Model for me
 		avr.Model = data.Device.ModelName
 
 		return nil
@@ -228,8 +283,7 @@ func (avr *AVR) GetXMLData(url string) error {
 }
 
 /*
-?? make functions to be used by:?
-?	ApplyVolume      func(state *channels.VolumeState) error
+?? should I make functions to be used by:?
 ?	ApplyPlayURL func(url string, queue bool) error
 
 */
@@ -301,10 +355,11 @@ func SendCommand(cmd, ip string) (string, error) {
 			success <- resultError{nil, err}
 		} else if response.Status != "200 OK" {
 			success <- resultError{nil, fmt.Errorf(response.Status)}
+		} else {
+			defer response.Body.Close()
+			body, _ := ioutil.ReadAll(response.Body)
+			success <- resultError{body, nil}
 		}
-		defer response.Body.Close()
-		body, _ := ioutil.ReadAll(response.Body)
-		success <- resultError{body, nil}
 	}()
 	select {
 	case response := <-success:
@@ -325,6 +380,23 @@ func setZone(zone int) string {
 	return zoneText
 }
 
-// could check description XML file to find services AVR provides, like
+// extractVolume takes a full response string and returns the volume as a float
+func extractVolume(response string) (float64, error) {
+	// crop response string to just volume data
+	start := strings.Index(response, "<Volume>")
+	end := strings.Index(response, "</Volume>")
+	if start == -1 || end == -1 {
+		return 0, fmt.Errorf("Can't get volume state")
+	}
+	response = response[start:end]
+	start = strings.Index(response, "<Val>")
+	end = strings.Index(response, "</Val>")
+	valueString := response[start+5 : end]
+	// valueString will be like "-605", convert to float like -60.5
+	value, errConv := strconv.ParseFloat(valueString, 0)
+	return value / 10, errConv
+}
+
+// (why?) could check description XML file to find services AVR provides, like
 // <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
 // <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
