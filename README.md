@@ -1,7 +1,7 @@
-# go-ync
-go-ync is a library for communicating with Yamaha AVR (Audio Video Receivers) using the YNC (Yamaha Network Command) protocol written in Go.
+# go-avr-yamaha
+go-avr-yamaha is a library for communicating with Yamaha AVR (Audio Video Receivers) using the YNC (Yamaha Network Command) protocol written in Go.
 
-Designed to suit usage as a library for Ninja Sphere driver: sphere-yamaha
+Designed to suit usage as a library for Ninja Sphere driver (driver-avr-yamaha)
 
 Supports changing/setting:
 

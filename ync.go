@@ -1,4 +1,4 @@
-package ync
+package avryamaha
 
 import (
 	"bytes"
@@ -47,7 +47,6 @@ type Result struct {
 
 // DeviceXML is the XML container that stores the data we are interested in
 type DeviceXML struct {
-	FriendlyName string `xml:"friendlyName"`
 	SerialNumber string `xml:"serialNumber"`
 	ModelName    string `xml:"modelName"`
 }
@@ -119,10 +118,14 @@ func (r *AVR) ToggleMuted(zone int) (bool, error) {
 }
 
 // SetMuted sets the muted state to "On" or "Off" (as passed in) for a given zone
-func (r *AVR) SetMuted(state string, zone int) error {
+func (r *AVR) SetMuted(state bool, zone int) error {
 	zoneText := setZone(zone)
+	stateText := "Off"
+	if state {
+		stateText = "On"
+	}
 
-	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Mute>%v</Mute></Volume></%v></YAMAHA_AV>", zoneText, state, zoneText)
+	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Volume><Mute>%v</Mute></Volume></%v></YAMAHA_AV>", zoneText, stateText, zoneText)
 	_, err := SendCommand(command, r.IP)
 	return err
 }
@@ -238,9 +241,10 @@ func (r *AVR) GetState(zone int) (AVRState, error) {
 	return state, err
 }
 
-// GetXMLData gets the name and serial number from the Yamaha AVR's description XML file (url passed in)
+// GetXMLData gets the name and serial number from the Yamaha AVR's description XML file
 func (avr *AVR) GetXMLData() error {
 	success := make(chan resultError, 1)
+	// NOTE: this URL should be right, but hopefully we can get it from the SSDP response in future
 	url := "http://" + avr.IP + ":49154/MediaRenderer/desc.xml"
 	var err error
 
@@ -273,7 +277,6 @@ func (avr *AVR) GetXMLData() error {
 		}
 		// save data to AVR variable
 		avr.ID = data.Device.SerialNumber
-		//		avr.Name = data.Device.FriendlyName	// this is the same as Model for me
 		avr.Model = data.Device.ModelName
 
 		return nil
@@ -296,7 +299,7 @@ func Discover() (string, error) {
 
 	//	searchString := "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 20\r\n Man: \"ssdp:discover\"\r\n ST: urn:schemas-upnp-org:device:MediaServer:1\r\n"
 	searchString := "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 20\r\n Man: \"ssdp:discover\"\r\n ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
-	//	searchString = "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 10\r\n Man: \"ssdp:discover\"\r\n ST: ssdp:all\r\n "
+	searchString = "M-SEARCH * HTTP/1.1\r\n HOST:239.255.255.250:1900\r\n MX: 10\r\n Man: \"ssdp:discover\"\r\n ST: ssdp:all\r\n "
 	//	var ip string
 	var response string
 	var err error
