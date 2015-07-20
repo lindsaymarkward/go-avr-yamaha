@@ -87,10 +87,14 @@ func (r *AVR) SetInput(input string, zone int) error {
 	return err
 }
 
-// SetPower sets the power to "On" or "Standby" (as passed in) for a given zone
-func (r *AVR) SetPower(power string, zone int) error {
+// SetPower sets the power ("On" or "Standby") for a given zone
+func (r *AVR) SetPower(power bool, zone int) error {
 	zoneText := setZone(zone)
-	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Power_Control><Power>%v</Power></Power_Control></%v></YAMAHA_AV>", zoneText, power, zoneText)
+	powerText := "Standby"
+	if power {
+		powerText = "On"
+	}
+	command := fmt.Sprintf("<YAMAHA_AV cmd=\"PUT\"><%v><Power_Control><Power>%v</Power></Power_Control></%v></YAMAHA_AV>", zoneText, powerText, zoneText)
 	_, err := SendCommand(command, r.IP)
 	return err
 }
@@ -285,12 +289,6 @@ func (avr *AVR) GetXMLData() error {
 	}
 }
 
-/*
-?? should I make functions to be used by:?
-?	ApplyPlayURL func(url string, queue bool) error
-
-*/
-
 // Discover uses SSDP (UDP) to find and return the IP address of the Yamaha AVR
 // returns an empty string if not found ??
 // TODO: right now it only finds MythTV, not the AVR
@@ -400,6 +398,6 @@ func extractVolume(response string) (float64, error) {
 	return value / 10, errConv
 }
 
-// (why?) could check description XML file to find services AVR provides, like
+// (why? probably not helpful) could check description XML file to find services AVR provides, like
 // <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
 // <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
